@@ -19,7 +19,7 @@ st.set_page_config(
 
 st.title("Análise de Acelerômetro e Giroscópio")
 
-FS = 100  # Hz
+FS = 100  # frequência de interpolação em Hz
 
 
 # ============================================================
@@ -35,46 +35,105 @@ def michaelis_menten(x, DC, Vmax, n, Km):
     )
 
 
-# ------------------------------------------------------------
-# LEITURA DOS ARQUIVOS
-# ------------------------------------------------------------
+# ============================================================
+# LEITURA DE ARQUIVOS
+# ============================================================
 
-def read_sensor_file(
-    uploaded_file,
-    separator=";"
-):
+def read_sensor_file(uploaded_file):
 
     """
-    Lê as quatro primeiras colunas independentemente
-    do conteúdo do cabeçalho.
+    Lê arquivos CSV ou TXT com delimitador automático.
 
-    Estrutura:
+    Delimitadores aceitos:
+    - vírgula: ,
+    - ponto e vírgula: ;
+    - tabulação: \\t
 
+    A interpretação NÃO depende do cabeçalho.
+
+    Estrutura obrigatória:
     coluna 0 = tempo em ms
-    coluna 1 = X
-    coluna 2 = Y
-    coluna 3 = Z
+    coluna 1 = eixo X
+    coluna 2 = eixo Y
+    coluna 3 = eixo Z
     """
 
     uploaded_file.seek(0)
 
+    df = None
+
     # --------------------------------------------------------
-    # primeira tentativa: com cabeçalho
+    # PRIMEIRA TENTATIVA:
+    # detecção automática pelo pandas
     # --------------------------------------------------------
 
-    df = pd.read_csv(
-        uploaded_file,
-        sep=separator
-    )
+    try:
+
+        df_test = pd.read_csv(
+            uploaded_file,
+            sep=None,
+            engine="python"
+        )
+
+        if df_test.shape[1] >= 4:
+            df = df_test
+
+    except Exception:
+        df = None
+
+    # --------------------------------------------------------
+    # SEGUNDA TENTATIVA:
+    # testa explicitamente os delimitadores
+    # --------------------------------------------------------
+
+    if df is None:
+
+        delimiters = [
+            ";",
+            ",",
+            "\t"
+        ]
+
+        for delimiter in delimiters:
+
+            uploaded_file.seek(0)
+
+            try:
+
+                df_test = pd.read_csv(
+                    uploaded_file,
+                    sep=delimiter
+                )
+
+                if df_test.shape[1] >= 4:
+
+                    df = df_test
+                    break
+
+            except Exception:
+                continue
+
+    # --------------------------------------------------------
+    # VERIFICAÇÃO
+    # --------------------------------------------------------
+
+    if df is None:
+
+        raise ValueError(
+            "Não foi possível identificar o delimitador. "
+            "O arquivo deve usar vírgula, ponto e vírgula "
+            "ou tabulação."
+        )
 
     if df.shape[1] < 4:
 
         raise ValueError(
-            "O arquivo precisa possuir pelo menos "
-            "quatro colunas."
+            "O arquivo precisa possuir pelo menos 4 colunas."
         )
 
-    # somente as 4 primeiras colunas
+    # --------------------------------------------------------
+    # SOMENTE AS QUATRO PRIMEIRAS COLUNAS
+    # --------------------------------------------------------
 
     df = df.iloc[
         :,
@@ -82,7 +141,7 @@ def read_sensor_file(
     ].copy()
 
     # --------------------------------------------------------
-    # converter conteúdo para números
+    # CONVERTER PARA NUMÉRICO
     # --------------------------------------------------------
 
     for col in df.columns:
@@ -92,7 +151,9 @@ def read_sensor_file(
             errors="coerce"
         )
 
-    # remover linhas inválidas
+    # --------------------------------------------------------
+    # REMOVER LINHAS INVÁLIDAS
+    # --------------------------------------------------------
 
     df = df.dropna(
         subset=df.columns[:4]
@@ -103,15 +164,16 @@ def read_sensor_file(
     if len(df) < 10:
 
         raise ValueError(
-            "Poucas amostras numéricas válidas foram encontradas."
+            "Após a leitura foram encontradas menos de "
+            "10 amostras numéricas válidas."
         )
 
     return df
 
 
-# ------------------------------------------------------------
-# FILTRO
-# ------------------------------------------------------------
+# ============================================================
+# FILTRO BUTTERWORTH
+# ============================================================
 
 def butterworth_filter(
     data,
@@ -131,15 +193,14 @@ def butterworth_filter(
         if low <= 0:
 
             raise ValueError(
-                "A frequência de corte inferior deve "
-                "ser maior que zero."
+                "A frequência inferior deve ser maior que 0 Hz."
             )
 
         if high >= nyquist:
 
             raise ValueError(
-                f"A frequência de corte superior deve ser "
-                f"menor que {nyquist:.1f} Hz."
+                f"A frequência superior deve ser menor "
+                f"que {nyquist:.1f} Hz."
             )
 
         if low >= high:
@@ -159,7 +220,7 @@ def butterworth_filter(
         if cutoff <= 0:
 
             raise ValueError(
-                "A frequência de corte deve ser maior que zero."
+                "A frequência de corte deve ser maior que 0 Hz."
             )
 
         if cutoff >= nyquist:
@@ -179,16 +240,18 @@ def butterworth_filter(
         btype=btype
     )
 
-    return filtfilt(
+    filtered = filtfilt(
         b,
         a,
         data
     )
 
+    return filtered
 
-# ------------------------------------------------------------
+
+# ============================================================
 # PRÉ-PROCESSAMENTO
-# ------------------------------------------------------------
+# ============================================================
 
 def preprocess_sensor(
     df,
@@ -198,96 +261,75 @@ def preprocess_sensor(
 ):
 
     """
-    Usa SEMPRE:
+    Sempre interpreta:
 
     coluna 0 = tempo em ms
     coluna 1 = X
     coluna 2 = Y
     coluna 3 = Z
 
-    Não considera os nomes do cabeçalho.
+    Não utiliza os nomes do cabeçalho.
+
+    Procedimentos:
+    - remoção de NaN
+    - ordenação temporal
+    - remoção de timestamps duplicados
+    - conversão da aceleração para m/s², se necessário
+    - detrend
+    - interpolação para fs
     """
 
     # --------------------------------------------------------
-    # leitura pela posição
+    # LEITURA POR POSIÇÃO
     # --------------------------------------------------------
 
     time_raw = pd.to_numeric(
         df.iloc[:, 0],
         errors="coerce"
-    ).to_numpy(
-        dtype=float
-    )
+    ).to_numpy(dtype=float)
 
     x_raw = pd.to_numeric(
         df.iloc[:, 1],
         errors="coerce"
-    ).to_numpy(
-        dtype=float
-    )
+    ).to_numpy(dtype=float)
 
     y_raw = pd.to_numeric(
         df.iloc[:, 2],
         errors="coerce"
-    ).to_numpy(
-        dtype=float
-    )
+    ).to_numpy(dtype=float)
 
     z_raw = pd.to_numeric(
         df.iloc[:, 3],
         errors="coerce"
-    ).to_numpy(
-        dtype=float
-    )
+    ).to_numpy(dtype=float)
 
     # --------------------------------------------------------
-    # remover valores inválidos
+    # REMOVER VALORES INVÁLIDOS
     # --------------------------------------------------------
 
     valid = (
-        np.isfinite(
-            time_raw
-        )
+        np.isfinite(time_raw)
         &
-        np.isfinite(
-            x_raw
-        )
+        np.isfinite(x_raw)
         &
-        np.isfinite(
-            y_raw
-        )
+        np.isfinite(y_raw)
         &
-        np.isfinite(
-            z_raw
-        )
+        np.isfinite(z_raw)
     )
 
-    time_raw = time_raw[
-        valid
-    ]
+    time_raw = time_raw[valid]
+    x_raw = x_raw[valid]
+    y_raw = y_raw[valid]
+    z_raw = z_raw[valid]
 
-    x_raw = x_raw[
-        valid
-    ]
-
-    y_raw = y_raw[
-        valid
-    ]
-
-    z_raw = z_raw[
-        valid
-    ]
-
-    if len(
-        time_raw
-    ) < 10:
+    if len(time_raw) < 10:
 
         raise ValueError(
             "Número insuficiente de amostras."
         )
 
     # --------------------------------------------------------
-    # ordenar pelo tempo
+    # ORDENAR PELO TEMPO
     # --------------------------------------------------------
 
     sort_idx = np.argsort(
@@ -311,7 +353,7 @@ def preprocess_sensor(
     ]
 
     # --------------------------------------------------------
-    # remover timestamps duplicados
+    # REMOVER TIMESTAMPS DUPLICADOS
     # --------------------------------------------------------
 
     time_unique, unique_idx = np.unique(
@@ -335,7 +377,6 @@ def preprocess_sensor(
 
     # --------------------------------------------------------
     # ACELERÔMETRO
-    #
     # saída sempre em m/s²
     # --------------------------------------------------------
 
@@ -343,17 +384,9 @@ def preprocess_sensor(
 
         if accelerometer_unit == "g":
 
-            x_raw = (
-                x_raw * 9.81
-            )
-
-            y_raw = (
-                y_raw * 9.81
-            )
-
-            z_raw = (
-                z_raw * 9.81
-            )
+            x_raw = x_raw * 9.81
+            y_raw = y_raw * 9.81
+            z_raw = z_raw * 9.81
 
     # --------------------------------------------------------
     # DETREND
@@ -372,7 +405,7 @@ def preprocess_sensor(
     )
 
     # --------------------------------------------------------
-    # INTERPOLAÇÃO PARA 100 Hz
+    # INTERPOLAÇÃO
     # --------------------------------------------------------
 
     step_ms = (
@@ -427,7 +460,9 @@ def preprocess_sensor(
         time_interp / 1000
     )
 
-    # norma
+    # --------------------------------------------------------
+    # NORMA
+    # --------------------------------------------------------
 
     norm = np.sqrt(
         x ** 2
@@ -446,9 +481,9 @@ def preprocess_sensor(
     )
 
 
-# ------------------------------------------------------------
-# BUSCA DE LIMIARES
-# ------------------------------------------------------------
+# ============================================================
+# LIMIARES
+# ============================================================
 
 def first_index_above(
     data,
@@ -459,17 +494,13 @@ def first_index_above(
         data >= threshold
     )[0]
 
-    if len(
-        indices
-    ) == 0:
+    if len(indices) == 0:
 
         raise ValueError(
-            "Não foi encontrado cruzamento superior."
+            "Não foi encontrado cruzamento superior do limiar."
         )
 
-    return indices[
-        0
-    ]
+    return indices[0]
 
 
 def first_index_below(
@@ -481,17 +512,13 @@ def first_index_below(
         data <= threshold
     )[0]
 
-    if len(
-        indices
-    ) == 0:
+    if len(indices) == 0:
 
         raise ValueError(
-            "Não foi encontrado cruzamento inferior."
+            "Não foi encontrado cruzamento inferior do limiar."
         )
 
-    return indices[
-        0
-    ]
+    return indices[0]
 
 
 # ============================================================
@@ -547,7 +574,7 @@ with tab_acc:
     with col2:
 
         acc_cutoff = st.number_input(
-            "Filtro passa-baixa (Hz)",
+            "Filtro passa-baixa do acelerômetro (Hz)",
             min_value=0.1,
             max_value=20.0,
             value=0.5,
@@ -562,7 +589,7 @@ with tab_acc:
         )
 
     # ========================================================
-    # PROCESSAMENTO
+    # PROCESSAMENTO DO ACELERÔMETRO
     # ========================================================
 
     if uploaded_acc is not None:
@@ -574,8 +601,7 @@ with tab_acc:
             # ----------------------------------------------------
 
             df_acc = read_sensor_file(
-                uploaded_acc,
-                separator=";"
+                uploaded_acc
             )
 
             # ----------------------------------------------------
@@ -596,7 +622,7 @@ with tab_acc:
             )
 
             # ----------------------------------------------------
-            # FILTROS
+            # FILTRO
             # ----------------------------------------------------
 
             acc_x_filtered = butterworth_filter(
@@ -631,7 +657,9 @@ with tab_acc:
                 btype="low"
             )
 
-            # guardar
+            # ----------------------------------------------------
+            # GUARDAR NO SESSION STATE
+            # ----------------------------------------------------
 
             st.session_state[
                 "t_acc"
@@ -684,7 +712,7 @@ with tab_acc:
             )
 
             # ====================================================
-            # MODELOS HIPERBÓLICOS
+            # MODELO HIPERBÓLICO
             # ====================================================
 
             if use_hyperbolic_model:
@@ -722,15 +750,17 @@ with tab_acc:
                             peak_index <= lim1
                             or
                             peak_index >=
-                            len(
-                                t_acc
-                            ) - lim1
+                            len(t_acc) - lim1
                         ):
 
                             raise ValueError(
                                 "O pico principal está muito "
                                 "próximo das extremidades."
                             )
+
+                        # =========================================
+                        # CHUTE INICIAL
+                        # =========================================
 
                         initial_guess = [
                             0.1,
@@ -762,9 +792,7 @@ with tab_acc:
                         )
 
                         y_data_end_reverse = (
-                            y_data_end[
-                                ::-1
-                            ]
+                            y_data_end[::-1]
                         )
 
                         params_end, _ = curve_fit(
@@ -791,9 +819,7 @@ with tab_acc:
                         )
 
                         y_fit_end = (
-                            y_fit_end[
-                                ::-1
-                            ]
+                            y_fit_end[::-1]
                         )
 
                         x_data_end_absolute = (
@@ -900,7 +926,7 @@ with tab_acc:
                         )
 
                         # =========================================
-                        # INÍCIO/FIM
+                        # INÍCIO E FINAL
                         # =========================================
 
                         inicio_atividade = (
@@ -1044,9 +1070,7 @@ with tab_acc:
                             inicio_atividade
                         )
 
-                        # -----------------------------------------
-                        # GANHO ACELERAÇÃO
-                        # -----------------------------------------
+                        # ganho aceleração
 
                         delta_t_acc = (
                             x_data_start_absolute[
@@ -1072,9 +1096,7 @@ with tab_acc:
 
                             ganho_aceleracao = np.nan
 
-                        # -----------------------------------------
-                        # GANHO DESACELERAÇÃO
-                        # -----------------------------------------
+                        # ganho desaceleração
 
                         delta_t_dec = (
                             x_data_end_absolute[
@@ -1100,6 +1122,8 @@ with tab_acc:
 
                             ganho_desaceleracao = np.nan
 
+                        # razão
+
                         if (
                             np.isfinite(
                                 ganho_aceleracao
@@ -1121,6 +1145,8 @@ with tab_acc:
                         else:
 
                             razao_ganhos = np.nan
+
+                        # velocidade
 
                         if tempo_total > 0:
 
@@ -1217,11 +1243,11 @@ with tab_acc:
                         )
 
                         # =========================================
-                        # PARÂMETROS DOS MODELOS
+                        # PARÂMETROS DO MODELO
                         # =========================================
 
                         with st.expander(
-                            "Parâmetros dos modelos"
+                            "Parâmetros dos modelos hiperbólicos"
                         ):
 
                             model_table = pd.DataFrame(
@@ -1232,12 +1258,14 @@ with tab_acc:
                                         "n",
                                         "Km"
                                     ],
+
                                     "Aceleração": [
                                         DC_fit_start,
                                         Vmax_fit_start,
                                         n_fit_start,
                                         Km_fit_start
                                     ],
+
                                     "Desaceleração": [
                                         DC_fit_end,
                                         Vmax_fit_end,
@@ -1265,8 +1293,8 @@ with tab_acc:
                         )
 
                         st.error(
-                            "Não foi possível ajustar os "
-                            "modelos hiperbólicos."
+                            "Não foi possível ajustar "
+                            "os modelos hiperbólicos."
                         )
 
                         st.write(
@@ -1316,11 +1344,11 @@ with tab_gyro:
     )
 
     # ========================================================
-    # CONFIGURAÇÃO DO FILTRO
+    # FILTRO
     # ========================================================
 
     st.subheader(
-        "Filtro do giroscópio"
+        "Filtro passa-banda"
     )
 
     col1, col2 = st.columns(
@@ -1354,7 +1382,7 @@ with tab_gyro:
     # ========================================================
 
     gyro_signal_choice = st.selectbox(
-        "Registro utilizado para o gráfico e detecção de picos",
+        "Registro utilizado para o gráfico e detecção dos picos",
         options=[
             "X",
             "Y",
@@ -1365,7 +1393,7 @@ with tab_gyro:
     )
 
     # ========================================================
-    # PICOS
+    # DETECÇÃO DOS PICOS
     # ========================================================
 
     st.subheader(
@@ -1397,7 +1425,7 @@ with tab_gyro:
         )
 
     # ========================================================
-    # PROCESSAMENTO
+    # PROCESSAMENTO DO GIROSCÓPIO
     # ========================================================
 
     if uploaded_gyro is not None:
@@ -1409,8 +1437,7 @@ with tab_gyro:
             # ----------------------------------------------------
 
             df_gyro = read_sensor_file(
-                uploaded_gyro,
-                separator=";"
+                uploaded_gyro
             )
 
             # ----------------------------------------------------
@@ -1430,7 +1457,7 @@ with tab_gyro:
             )
 
             # ----------------------------------------------------
-            # FILTRO NOS EIXOS
+            # FILTRO PASSA-BANDA NOS EIXOS
             # ----------------------------------------------------
 
             gyro_x_filtered = butterworth_filter(
@@ -1467,7 +1494,10 @@ with tab_gyro:
             )
 
             # ----------------------------------------------------
-            # NORMA DEPOIS DO FILTRO
+            # NORMA
+            #
+            # Calculada DEPOIS de filtrar X, Y e Z.
+            # Assim, nunca é negativa.
             # ----------------------------------------------------
 
             gyro_norm_filtered = np.sqrt(
@@ -1479,7 +1509,7 @@ with tab_gyro:
             )
 
             # ====================================================
-            # ESCOLHA DO REGISTRO
+            # SELEÇÃO DO REGISTRO
             # ====================================================
 
             if gyro_signal_choice == "X":
@@ -1550,7 +1580,7 @@ with tab_gyro:
 
             ax.set_title(
                 f"Giroscópio - {gyro_signal_choice} "
-                f"({gyro_lowcut:.2f}-{gyro_highcut:.2f} Hz)"
+                f"({gyro_lowcut:.2f}–{gyro_highcut:.2f} Hz)"
             )
 
             if gyro_signal_choice == "Norma":
@@ -1572,7 +1602,7 @@ with tab_gyro:
             )
 
             # ====================================================
-            # INÍCIO/FIM
+            # VERIFICAR INÍCIO E FINAL
             # ====================================================
 
             if (
@@ -1603,18 +1633,18 @@ with tab_gyro:
                     ]
                 )
 
+                # ------------------------------------------------
+                # GARANTIR INTERVALO COMPATÍVEL
+                # ------------------------------------------------
+
                 inicio_real = max(
                     inicio_atividade,
-                    t_gyro[
-                        0
-                    ]
+                    t_gyro[0]
                 )
 
                 fim_real = min(
                     fim_atividade,
-                    t_gyro[
-                        -1
-                    ]
+                    t_gyro[-1]
                 )
 
                 if inicio_real >= fim_real:
@@ -1627,7 +1657,7 @@ with tab_gyro:
                 else:
 
                     # =============================================
-                    # RECORTE
+                    # RECORTE DA ATIVIDADE
                     # =============================================
 
                     activity_mask = (
@@ -1649,7 +1679,7 @@ with tab_gyro:
                     )
 
                     # =============================================
-                    # DETECÇÃO DOS PICOS
+                    # DETECÇÃO DE PICOS
                     # =============================================
 
                     min_distance_samples = max(
@@ -1699,7 +1729,7 @@ with tab_gyro:
                     )
 
                     # =============================================
-                    # INTERVALOS
+                    # INTERVALOS ENTRE PICOS
                     # =============================================
 
                     if number_of_peaks >= 2:
@@ -1756,7 +1786,7 @@ with tab_gyro:
                         )
 
                     # =============================================
-                    # GRÁFICO COMPLETO COM PICOS
+                    # GRÁFICO COMPLETO COM INTERVALO
                     # =============================================
 
                     st.subheader(
@@ -1837,7 +1867,7 @@ with tab_gyro:
                     )
 
                     # =============================================
-                    # GRÁFICO DA ATIVIDADE
+                    # GRÁFICO APENAS DA ATIVIDADE
                     # =============================================
 
                     st.subheader(
@@ -1876,7 +1906,7 @@ with tab_gyro:
 
                     ax.set_title(
                         f"{gyro_signal_choice} "
-                        f"durante a atividade"
+                        "durante a atividade"
                     )
 
                     if gyro_signal_choice == "Norma":
