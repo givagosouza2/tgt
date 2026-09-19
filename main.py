@@ -189,15 +189,15 @@ def preprocess_sensor(
         if max_abs > 9:
 
             x_raw = (
-                x_raw / 9.81
+                x_raw
             )
 
             y_raw = (
-                y_raw / 9.81
+                y_raw
             )
 
             z_raw = (
-                z_raw / 9.81
+                z_raw
             )
 
     # --------------------------------------------------------
